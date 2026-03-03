@@ -17,6 +17,16 @@
 10. [File & Folder Structure](#10-file--folder-structure)
 11. [Environment & Secrets](#11-environment--secrets)
 12. [Open Questions Before Build](#12-open-questions-before-build)
+13. [Property & Cost Center Reference](#13-property--cost-center-reference)
+14. [Vendor Category Reference](#14-vendor-category-reference)
+15. [Deployment & Infrastructure](#15-deployment--infrastructure)
+16. [Security & Access Control](#16-security--access-control)
+17. [Testing Strategy](#17-testing-strategy)
+18. [Monitoring & Observability](#18-monitoring--observability)
+19. [Claude Prompt Engineering](#19-claude-prompt-engineering)
+20. [Risk Register & Mitigations](#20-risk-register--mitigations)
+21. [Late Payment Tracking](#21-late-payment-tracking)
+22. [Operations Runbook (Post Go-Live)](#22-operations-runbook-post-go-live)
 
 ---
 
@@ -720,3 +730,802 @@ These must be resolved before or during Phase 0:
 | 8 | What Notion databases already exist, and can we create new ones? | Thomas | Notion integration |
 | 9 | Are there any invoices that arrive as email body (no PDF)? | Marie | Extractor scope |
 | 10 | Do property managers have Slack and are they active users? | Thomas | Approval flow reliability |
+
+---
+
+## 13. Property & Cost Center Reference
+
+### Property Registry
+
+| Property | Type | Short Code | Cost Center ID | Pennylane Entity |
+|---|---|---|---|---|
+| Hôtel Le Cèdre | Boutique Hotel | HLC | CC-01 | `PENNYLANE_TOKEN_CC01` |
+| Hôtel des Arènes | Boutique Hotel | HDA | CC-02 | `PENNYLANE_TOKEN_CC02` |
+| Villa Margot | Boutique Hotel | VMA | CC-03 | `PENNYLANE_TOKEN_CC03` |
+| Le Refuge Urbain | Boutique Hotel | LRU | CC-04 | `PENNYLANE_TOKEN_CC04` |
+| Hôtel Bastide Sud | Boutique Hotel | HBS | CC-05 | `PENNYLANE_TOKEN_CC05` |
+| Maison Colette | Boutique Hotel | MCO | CC-06 | `PENNYLANE_TOKEN_CC06` |
+| Restaurant Le Patio | Restaurant | RLP | CC-07 | `PENNYLANE_TOKEN_CC07` |
+| Brasserie des Halles | Restaurant | BDH | CC-08 | `PENNYLANE_TOKEN_CC08` |
+
+### Cost Center → Google Drive Folder Mapping
+
+```python
+COST_CENTER_FOLDERS = {
+    "CC-01": "CC-01_LeCedre",
+    "CC-02": "CC-02_DesArenes",
+    "CC-03": "CC-03_VillaMargot",
+    "CC-04": "CC-04_RefugeUrbain",
+    "CC-05": "CC-05_BastideSud",
+    "CC-06": "CC-06_MaisonColette",
+    "CC-07": "CC-07_LePatio",
+    "CC-08": "CC-08_BrasserieDesHalles",
+}
+```
+
+### Cost Center → Slack Channel Mapping
+
+```python
+CC_SLACK_CHANNELS = {
+    "CC-01": "#hotel-lecedre",
+    "CC-02": "#hotel-desarenes",
+    "CC-03": "#hotel-villamargot",
+    "CC-04": "#hotel-refugeurbain",
+    "CC-05": "#hotel-bastidesud",
+    "CC-06": "#hotel-maisoncolette",
+    "CC-07": "#restaurant-lepatio",
+    "CC-08": "#brasserie-deshalles",
+}
+```
+
+### Property Email → Cost Center Detection
+
+The 30% problem: invoices CC'd to property-specific emails must be mapped to their cost center. Detection chain:
+
+1. Parse `To:` and `CC:` email headers
+2. Match property email addresses against a lookup table (populated on hiring when emails are provided)
+3. If a property email is found → assign that cost center
+4. If the AP inbox is the only recipient → fall through to PDF content / vendor default
+
+```python
+# Populated during onboarding with actual property emails
+PROPERTY_EMAIL_MAP = {
+    "lecedre@example.com": "CC-01",
+    "desarenes@example.com": "CC-02",
+    # ... filled per property
+}
+```
+
+### Personnel Map
+
+| Role | Name | Slack User ID | Cost Center Scope |
+|---|---|---|---|
+| Finance Manager | Marie | `SLACK_USER_MARIE` | All |
+| Ops Coordinator | Thomas | `SLACK_USER_THOMAS` | All |
+| Direction | – | `SLACK_USER_DIRECTION` | All |
+| Property Manager CC-01 | – | `SLACK_USER_PM_CC01` | CC-01 |
+| Property Manager CC-02 | – | `SLACK_USER_PM_CC02` | CC-02 |
+| Property Manager CC-03 | – | `SLACK_USER_PM_CC03` | CC-03 |
+| Property Manager CC-04 | – | `SLACK_USER_PM_CC04` | CC-04 |
+| Property Manager CC-05 | – | `SLACK_USER_PM_CC05` | CC-05 |
+| Property Manager CC-06 | – | `SLACK_USER_PM_CC06` | CC-06 |
+
+> Restaurants (CC-07, CC-08) managed directly by Thomas — no separate property manager approval required.
+
+---
+
+## 14. Vendor Category Reference
+
+### GL Structure by Supplier Category
+
+| Category | Example Suppliers | Default GL | Typical VAT | Notes |
+|---|---|---|---|---|
+| Food & Beverage | Metro, Transgourmet, local producers | 607100 | 5.5% / 10% | Mixed VAT common on single invoice |
+| Maintenance & Repairs | Local plumbers, electricians, HVAC | 615000 | 20% | Property Manager approval >1,000€ |
+| Linen & Laundry | Elis, local laundry | 606400 | 20% | |
+| Telecom & Internet | Orange Pro, SFR Business | 626000 | 20% | |
+| Energy (Electric/Gas) | EDF Pro, Engie | 606100 | 20% | |
+| Insurance | AXA, Allianz | 616000 | exempt (0%) | Flag if 20% VAT is detected on invoice |
+| Software & Subscriptions | Mews (PMS), Pennylane, Canva | 626700 | 20% | English invoices common |
+| Cleaning Supplies | Pro Hygiène, Ecolab | 606200 | 20% | |
+| Marketing & Ads | Local agencies, Meta invoices | 623100 | 20% | Meta invoices in English |
+
+### Known Vendor Edge Cases
+
+| Vendor | Issue | Handling Rule |
+|---|---|---|
+| Metro (all locations) | Same invoice number may be reused across delivery locations; multiple deliveries per day | Dedup key = `vendor_id + invoice_number + cost_center + invoice_date` |
+| Transgourmet | Similar to Metro; volume delivery supplier | Same compound dedup key |
+| Metro / Transgourmet | Always sends 2 PDFs — only first is the actual invoice | Extraction should ignore second attachment; if 2 PDFs → process first, flag second as informational |
+| Insurance (AXA/Allianz) | Sometimes shows 20% VAT incorrectly | VAT validator override: if GL=616000 → force VAT 0% and alert |
+| Food suppliers | Mix of 5.5% and 10% VAT on single invoice | Multi-VATLine extraction; math check sum of all VAT lines |
+| One-off suppliers | ~20% of total, no existing vendor record | Route to exception flow; Marie must create vendor before processing |
+
+### VAT Rate Reference (France)
+
+| Rate | Applies To |
+|---|---|
+| 20% | Standard rate — most goods and services |
+| 10% | Prepared food, restaurant services, renovation work |
+| 5.5% | Basic food products (unprepared), water supply |
+| 2.1% | Newspapers, certain pharmaceuticals (unlikely for this business) |
+| 0% (exempt) | Insurance, certain financial services |
+
+---
+
+## 15. Deployment & Infrastructure
+
+### Render Setup
+
+| Component | Render Service Type | Plan | Notes |
+|---|---|---|---|
+| Main Agent (FastAPI) | Web Service | Starter ($7/mo) | Runs Gmail listener, scheduler, Slack bot |
+| PostgreSQL | Managed DB | Starter ($7/mo) | 1GB storage, upgrade as volume grows |
+| Redis (optional) | No Render Redis needed | – | APScheduler uses PostgreSQL job store |
+
+### Deployment Architecture
+
+```
+┌──────────────────────────────────────────────────┐
+│                    Render                         │
+│                                                  │
+│   ┌────────────────────────────────────┐         │
+│   │       Web Service (Python)         │         │
+│   │                                    │         │
+│   │  ┌─────────┐  ┌────────────────┐   │         │
+│   │  │ FastAPI  │  │  Slack Bolt    │   │         │
+│   │  │ (webhooks│  │  (Socket Mode) │   │         │
+│   │  │  + admin)│  │                │   │         │
+│   │  └─────────┘  └────────────────┘   │         │
+│   │                                    │         │
+│   │  ┌─────────────────────────────┐   │         │
+│   │  │  APScheduler (in-process)   │   │         │
+│   │  │  - overdue approvals check  │   │         │
+│   │  │  - late payment check       │   │         │
+│   │  │  - vendor Notion sync       │   │         │
+│   │  │  - budget report            │   │         │
+│   │  └─────────────────────────────┘   │         │
+│   │                                    │         │
+│   │  ┌─────────────────────────────┐   │         │
+│   │  │  Gmail Pub/Sub Listener     │   │         │
+│   │  │  (webhook receiver)         │   │         │
+│   │  └─────────────────────────────┘   │         │
+│   └────────────────────────────────────┘         │
+│                    │                             │
+│                    ▼                             │
+│   ┌────────────────────────────────────┐         │
+│   │  PostgreSQL (Render Managed)       │         │
+│   │  - vendors, jobs, invoices,        │         │
+│   │    approval_requests, audit_log    │         │
+│   │  - APScheduler job store           │         │
+│   └────────────────────────────────────┘         │
+│                                                  │
+└──────────────────────────────────────────────────┘
+         │              │              │
+         ▼              ▼              ▼
+   Google APIs     Pennylane API    Slack API
+   (Gmail, Drive,                  (Socket Mode)
+    Sheets)
+```
+
+### `render.yaml` Blueprint
+
+```yaml
+services:
+  - type: web
+    name: invoice-agent
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn api.main:app --host 0.0.0.0 --port $PORT
+    plan: starter
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.8"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: invoice-agent-db
+          property: connectionString
+      # All other env vars set via Render dashboard
+
+databases:
+  - name: invoice-agent-db
+    plan: starter
+    postgresMajorVersion: 16
+```
+
+### Process Lifecycle
+
+- **Cold start**: Render Starter plan may spin down after 15 minutes of inactivity. Gmail Pub/Sub webhook or Slack Socket Mode reconnect triggers spin-up.
+- **Workaround**: APScheduler `check_overdue_approvals` runs every 30 minutes → acts as a keep-alive ping.
+- **Upgrade path**: If cold-start latency is unacceptable, upgrade to Render Standard ($25/mo) for always-on.
+
+### Database Scaling
+
+| Metric | Phase 6 Expected | 12-Month Projected |
+|---|---|---|
+| Vendors | ~80 rows | ~120 rows |
+| Jobs/month | ~200 invoices (estimated) | ~250 invoices |
+| Audit log rows/month | ~1,000 | ~1,500 |
+| Total DB size | <50 MB | <200 MB |
+
+PostgreSQL Starter plan (1 GB) is sufficient for 12+ months. Monitor via Render metrics dashboard.
+
+---
+
+## 16. Security & Access Control
+
+### Principle of Least Privilege
+
+| Integration | Permission Scope |
+|---|---|
+| Gmail (Service Account) | `gmail.readonly` + `gmail.send` (escalation emails only) on AP inbox |
+| Google Drive (Service Account) | `drive.file` scope — only folders shared with the service account |
+| Google Sheets (Service Account) | `spreadsheets.readonly` — budget file only |
+| Pennylane | Per-entity API tokens — write invoices only |
+| Slack Bot | Channels: write to 4 specific channels + read interactions |
+| Notion | Integration scoped to 3 databases only |
+| PostgreSQL | Single app user, no superuser access |
+
+### Secrets Management
+
+- **Development**: `.env` file (git-ignored)
+- **Production**: Render Environment Variables (encrypted at rest)
+- **No secrets in code**: all tokens/keys referenced via `os.environ`
+- **Rotation**: Pennylane tokens and Slack tokens rotated quarterly (calendar reminder for Marie)
+
+### Data Sensitivity
+
+| Data Type | Classification | Handling |
+|---|---|---|
+| Vendor SIRET numbers | Business data (public) | Stored in PostgreSQL, no special encryption |
+| Invoice amounts | Financial — Confidential | Logged in audit trail, not exposed in public channels |
+| Supplier bank details | PII — Sensitive | **Never extracted or stored** — handled exclusively in Pennylane |
+| PDF invoices | Financial — Confidential | Stored in Google Drive with restricted sharing |
+| Slack user IDs | Internal identifiers | Stored in env vars, not hardcoded |
+
+### Access Control Matrix
+
+| Actor | PostgreSQL | Google Drive | Pennylane | Slack | Notion |
+|---|---|---|---|---|---|
+| Agent (service account) | Full CRUD | Read/Write `/Factures Fournisseurs/` | POST invoices | Post messages, handle interactions | Create/Update rows |
+| Marie | No direct access | Full access (existing) | Full access (existing) | Approve/reject/edit invoices | View/edit all databases |
+| Thomas | No direct access | Full access (existing) | View (existing) | Approve/reject invoices | View/edit all databases |
+| Property Managers | No direct access | Own property folder (existing) | No access | View Slack messages from their channel | View only |
+| Direction | No direct access | Full access (existing) | Full access (existing) | Approve high-value invoices | View only |
+
+### Audit & Compliance
+
+- Every action logged to `audit_log` table with actor identification
+- Notion Journal d'audit provides business-readable audit trail
+- No invoice data is ever deleted — only status transitions
+- All corrections tracked with before/after snapshots in `details` JSONB
+
+---
+
+## 17. Testing Strategy
+
+### Testing Pyramid
+
+```
+                    ┌──────────┐
+                    │   E2E    │  2-3 full pipeline tests
+                    │  Tests   │  (real APIs in staging)
+                   ┌┴──────────┴┐
+                   │ Integration │  Per-integration tests
+                   │   Tests     │  (mocked external APIs)
+                  ┌┴─────────────┴┐
+                  │   Unit Tests   │  Pure logic: rules, validation, matching
+                  └────────────────┘
+```
+
+### Unit Tests (`tests/unit/`)
+
+| Module | Key Test Cases |
+|---|---|
+| `approval_engine` | All 5 routing rules; boundary values (499.99, 500, 2000, 2000.01); unknown vendor; maintenance+property manager |
+| `duplicate_detector` | Exact match; partial match (Metro cross-property); unique invoice; amount tolerance (±0.01) |
+| `vat_validator` | Math pass/fail; insurance at 20% flag; mixed food VAT 5.5%+10%; rounding tolerance ±0.02 |
+| `cost_center_router` | Email header match; PDF content fuzzy match; vendor default fallback; ambiguous multi-match |
+| `vendor_memory` | SIRET exact match; fuzzy name match (threshold tuning); alias match; miss → UNKNOWN |
+| `budget_checker` | Within budget; 90% warning threshold; over budget; missing budget entry |
+
+### Integration Tests (`tests/integration/`)
+
+| Integration | Test Approach |
+|---|---|
+| Gmail | Mock Gmail API responses with `responses` library; verify attachment download flow |
+| Google Drive | Mock Drive API; verify file rename, move, folder creation |
+| Pennylane | Mock REST API; verify payload structure, entity selection, error handling |
+| Slack | Slack test workspace or `slack_sdk.web.MockWebClient`; verify Block Kit messages |
+| Notion | Mock Notion API; verify database row creation with correct schema |
+| Claude | Mock Anthropic SDK; inject known JSON responses; test confidence scoring |
+| PostgreSQL | Use `testcontainers-python` with actual PostgreSQL; test migrations + queries |
+
+### End-to-End Tests (`tests/e2e/`)
+
+Run against staging environment (separate Render deployment with test data):
+
+1. **Happy Path**: Drop a test invoice PDF into INBOX_RAW → verify it reaches Pennylane sandbox + correct Drive folder + Notion entry
+2. **Duplicate Path**: Submit same invoice twice → verify second is caught and routed to exceptions
+3. **Unknown Vendor Path**: Submit invoice from new vendor → verify exception flow + Slack interaction + vendor creation
+
+### Test Fixtures (`tests/fixtures/`)
+
+- **10 anonymized real invoices** from Marie (obtained at kickoff) covering:
+  - French food supplier with mixed VAT
+  - English SaaS vendor
+  - Maintenance invoice >1,000€
+  - Insurance invoice (VAT exempt)
+  - Metro invoice with 2 attachments
+- **Synthetic invoices** for edge cases not covered by real samples
+- **Expected extraction JSON** for each fixture (golden files)
+
+### Test Execution
+
+```bash
+# Run all unit tests
+pytest tests/unit/ -v
+
+# Run integration tests (requires mock setup)
+pytest tests/integration/ -v
+
+# Run E2E (requires staging env vars)
+APP_ENV=staging pytest tests/e2e/ -v --timeout=120
+
+# Coverage target: 85% on agent/ package
+pytest tests/unit/ tests/integration/ --cov=agent --cov-report=html
+```
+
+### CI/CD Pipeline (Render Auto-Deploy)
+
+```
+Push to main → Render detects → Build → Run pytest tests/unit/ → Deploy
+```
+
+- Unit tests run on every deploy
+- Integration tests run manually before tagging a release
+- E2E tests run manually during Phase 6 dry-run
+
+---
+
+## 18. Monitoring & Observability
+
+### Logging
+
+- **Framework**: `structlog` with JSON output
+- **Log levels**: `INFO` for happy-path flow, `WARNING` for soft flags (budget 90%, VAT mismatch), `ERROR` for failures (API errors, extraction failures)
+- **Correlation ID**: Every job gets a `job_id` logged in all related operations
+- **Output**: stdout → Render Log Stream → view in Render dashboard
+
+```python
+import structlog
+
+logger = structlog.get_logger()
+
+logger.info("invoice_extracted",
+    job_id=str(job.id),
+    vendor_name=extracted.vendor_name,
+    total_ttc=str(extracted.total_ttc),
+    confidence=extracted.raw_confidence,
+    cost_center=resolved_cc,
+)
+```
+
+### Slack-Based Monitoring Dashboard
+
+Since the team lives in Slack, monitoring happens there:
+
+| Channel | Automated Posts | Frequency |
+|---|---|---|
+| `#finance-ops` | Daily digest: invoices processed, exceptions pending, approvals waiting | Daily 08:30 |
+| `#finance-ops` | Weekly budget summary by cost center | Monday 07:00 |
+| `#finance-alerts` | Overdue approvals | Every 30 min (only if overdue exist) |
+| `#finance-alerts` | Late payments approaching due date | Daily 08:00 |
+| `#invoice-exceptions` | Each exception as it occurs | Real-time |
+
+### Daily Digest Format (Slack Block Kit)
+
+```
+📊 Invoice Agent — Daily Digest (2025-06-15)
+────────────────────────────────────
+Processed yesterday:      12 invoices
+Total value:              €14,230.50
+Pushed to Pennylane:      10 ✓
+Pending approval:          1 (Marie, 6h remaining)
+Exceptions:                1 (Unknown vendor — Plomberie Dupont)
+────────────────────────────────────
+Top cost centers:
+  CC-01 Le Cèdre:          4 invoices (€5,120)
+  CC-07 Le Patio:           3 invoices (€4,800)
+  CC-03 Villa Margot:       2 invoices (€2,100)
+```
+
+### Health Checks
+
+| Check | Endpoint/Method | Frequency | Alert If |
+|---|---|---|---|
+| App alive | `GET /health` | Render built-in | Service restarts |
+| DB connection | `GET /health/db` | Every 5 min (scheduler) | Connection pool exhausted |
+| Gmail Pub/Sub | Check last received timestamp | Every 15 min | No emails received in 4 hours (business hours) |
+| Slack Socket Mode | Reconnect event handler | On disconnect | Post-reconnect log entry |
+| Pennylane API | Token validation on startup | On deploy | Expired/invalid token |
+
+### Key Metrics (Tracked in PostgreSQL)
+
+```sql
+-- Daily processing summary (used by daily digest)
+SELECT
+    DATE(created_at) AS day,
+    COUNT(*) AS total_jobs,
+    COUNT(*) FILTER (WHERE status = 'COMPLETED') AS completed,
+    COUNT(*) FILTER (WHERE status = 'EXCEPTION') AS exceptions,
+    COUNT(*) FILTER (WHERE status = 'PENDING_APPROVAL') AS pending_approval,
+    AVG(EXTRACT(EPOCH FROM (updated_at - created_at))) AS avg_processing_seconds
+FROM jobs
+WHERE created_at > NOW() - INTERVAL '30 days'
+GROUP BY day
+ORDER BY day DESC;
+```
+
+### Alerting Escalation
+
+```
+Level 1 — Slack #finance-alerts      (automated, real-time)
+Level 2 — Email to Marie             (if no Slack response in 4h)
+Level 3 — Email to Direction          (if critical: Pennylane down, all jobs failing)
+```
+
+---
+
+## 19. Claude Prompt Engineering
+
+### Extraction Prompt Strategy
+
+Two system prompts maintained in `/prompts/`:
+- `extraction_fr.md` — optimized for French invoices (majority case)
+- `extraction_en.md` — for English invoices (SaaS vendors, Meta)
+
+Language is auto-detected from PDF text content (simple heuristic: presence of French keywords like "Facture", "TVA", "HT", "TTC" → French; otherwise English).
+
+### System Prompt Structure (French)
+
+```markdown
+## Rôle
+Tu es un agent d'extraction de factures pour un groupe hôtelier français
+(6 hôtels boutiques + 2 restaurants). Tu extrais les données structurées
+de factures fournisseurs.
+
+## Sortie attendue
+Retourne UNIQUEMENT un objet JSON valide correspondant au schéma suivant.
+Ne retourne aucun texte avant ou après le JSON.
+
+## Schéma JSON
+{schema}
+
+## Règles d'extraction
+1. **vendor_name**: Nom exact tel qu'imprimé sur la facture. Ne pas
+   normaliser (garder majuscules, accents, forme juridique).
+2. **siret**: Extraire le numéro SIRET/SIREN s'il apparaît. Format: 14
+   chiffres (SIRET) ou 9 chiffres (SIREN). Null si absent.
+3. **invoice_number**: Numéro de facture tel qu'indiqué. Chercher les
+   labels: "Facture N°", "N° Facture", "Invoice #", "Réf."
+4. **invoice_date**: Date d'émission. Formats courants: JJ/MM/AAAA,
+   JJ.MM.AAAA, AAAA-MM-JJ. Toujours retourner au format AAAA-MM-JJ.
+5. **due_date**: Date d'échéance si mentionnée. Null si absente.
+6. **subtotal_ht**: Montant hors taxes. Chercher "Total HT", "Sous-total HT".
+7. **vat_lines**: Tableau de toutes les lignes TVA. Pour chaque taux distinct:
+   - rate: taux décimal (0.055 pour 5.5%, 0.10 pour 10%, 0.20 pour 20%)
+   - base: montant HT soumis à ce taux
+   - amount: montant de TVA
+   ATTENTION: les factures alimentaires peuvent avoir 5.5% et 10% mélangés.
+8. **total_ttc**: Montant TTC final. Chercher "Total TTC", "Net à payer".
+9. **line_items**: Lignes de détail si présentes. Pour chaque ligne:
+   - description, quantity, unit_price, total, gl_hint (suggestion de
+     compte comptable basée sur la nature de la dépense)
+10. **currency**: Toujours "EUR" sauf indication contraire.
+
+## Cas particuliers
+- Factures d'assurance: TVA = 0% (exonéré). Si tu vois 20% de TVA sur une
+  facture d'assurance, extraire quand même mais mettre la confiance à < 0.5.
+- Factures Metro/Transgourmet: souvent accompagnées d'un bon de livraison.
+  N'extraire que la facture, pas le bon de livraison.
+- Si un champ est illisible ou absent, mettre null et baisser la confiance.
+
+## Score de confiance
+Pour chaque champ, retourne un score de 0.0 à 1.0:
+- 1.0 = clairement lisible et sans ambiguïté
+- 0.75-0.99 = lisible mais format inhabituel
+- 0.5-0.74 = partiellement lisible, reconstruction nécessaire
+- < 0.5 = douteux, probablement incorrect
+```
+
+### Extraction Call Pattern
+
+```python
+async def extract_invoice(raw_text: str, pdf_metadata: dict) -> InvoiceData:
+    language = detect_language(raw_text)
+    prompt_path = f"prompts/extraction_{'fr' if language == 'fr' else 'en'}.md"
+
+    system_prompt = load_prompt(prompt_path).format(
+        schema=InvoiceData.model_json_schema()
+    )
+
+    response = await anthropic_client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=4096,
+        system=system_prompt,
+        messages=[
+            {
+                "role": "user",
+                "content": f"Extrais les données de cette facture:\n\n{raw_text}"
+            }
+        ],
+        temperature=0.0,  # deterministic extraction
+    )
+
+    parsed = InvoiceData.model_validate_json(response.content[0].text)
+    return parsed
+```
+
+### Prompt Tuning Loop
+
+1. Run extraction on 10 real sample invoices (Phase 1 milestone)
+2. Compare output to manually coded ground truth
+3. Identify systematic errors (e.g., date format issues, missing SIRET)
+4. Adjust prompt instructions for each error class
+5. Re-run and measure accuracy improvement
+6. Target: >95% field-level accuracy on the 10-invoice sample set before moving to Phase 2
+
+### Cost Estimation
+
+| Factor | Value |
+|---|---|
+| Avg. invoice text | ~1,500 tokens |
+| System prompt | ~800 tokens |
+| Response | ~600 tokens |
+| Total per call | ~2,900 tokens |
+| Monthly volume | ~200 invoices |
+| Monthly token usage | ~580,000 tokens |
+| Estimated monthly cost | ~$1.50 (Claude Sonnet pricing) |
+
+---
+
+## 20. Risk Register & Mitigations
+
+| # | Risk | Likelihood | Impact | Mitigation |
+|---|---|---|---|---|
+| R1 | Claude misextracts a critical field (amount, vendor) | Medium | High — wrong amount in Pennylane | Confidence scoring + human approval on every invoice acts as safety net; math validation catches amount errors |
+| R2 | Gmail Pub/Sub subscription expires silently | Low | High — invoices stop being processed | Health check monitors `last_email_received_at`; alert if no email in 4 hours (business hours); polling fallback |
+| R3 | Pennylane API breaking changes | Low | High — invoice push fails | Pin API version in requests; error handling + retry; `PUSH_FAILED` status triggers Slack alert |
+| R4 | Render cold start delays processing | Medium | Low — invoice delayed by 30-60 seconds | APScheduler keep-alive; upgrade to Standard if unacceptable |
+| R5 | Marie on leave — only Thomas operates | Medium | Medium — Thomas cannot code unknown vendors | Vendor memory + learning loop reduces dependency on Marie; Thomas can approve known vendors; Direction as fallback |
+| R6 | Duplicate invoice slips through to Pennylane | Low | High — double payment | Compound dedup key (vendor + number + amount + cost center + date); Pennylane may also have own dedup |
+| R7 | Vendor name variant not recognized by fuzzy match | Medium | Low — routes to exception flow | Alias list maintained in vendor memory; rapidfuzz threshold tuned on real data; corrections auto-add aliases |
+| R8 | Mixed VAT invoice math check fails on rounding | Medium | Low — false positive exception | ±0.02 EUR rounding tolerance; configurable tolerance per vendor if needed |
+| R9 | Large PDF (scanned, multi-page) fails OCR | Low | Medium — extraction fails | Tesseract fallback + Claude handles imperfect text; flag for manual review if extraction confidence low |
+| R10 | Slack interaction buttons stop working | Low | High — approval flow blocked | Socket Mode auto-reconnect; fallback: Notion-based approval (manual, but possible) |
+| R11 | Budget Google Sheet format changes | Medium | Low — budget check fails | Budget check is a soft warning, not a blocker; Sheets API column detection is resilient to minor changes |
+| R12 | GDPR / data exposure via Slack messages | Low | High — compliance risk | Invoice amounts in Slack limited to total only; no supplier bank details ever exposed; private channels only |
+
+### Disaster Recovery
+
+| Scenario | Recovery Steps |
+|---|---|
+| PostgreSQL data loss | Render automated daily backups; restore from latest snapshot |
+| Render service outage | Invoices queue in Gmail inbox; process backlog on recovery (dedup prevents double-processing) |
+| Google Service Account revoked | Re-create SA, re-share Drive folder, update env var, redeploy |
+| Pennylane token expired | Marie regenerates in Pennylane UI; update env var per entity; redeploy |
+| Corrupted vendor memory | Restore from latest DB backup; Notion Fournisseurs serves as secondary source of truth |
+
+---
+
+## 21. Late Payment Tracking
+
+### Current Gap
+
+Marie manually checks for overdue payments once per week by cross-referencing Pennylane with her memory. No automated tracking exists.
+
+### Solution: Scheduled Late Payment Monitor
+
+```python
+# agent/late_payment_tracker.py
+
+async def check_late_payments():
+    """Runs daily at 08:00 via APScheduler"""
+
+    today = date.today()
+
+    # Upcoming due (next 3 days)
+    upcoming = await db.fetch("""
+        SELECT * FROM processed_invoices
+        WHERE status = 'COMPLETED'
+          AND due_date BETWEEN $1 AND $2
+          AND payment_confirmed = FALSE
+        ORDER BY due_date ASC
+    """, today, today + timedelta(days=3))
+
+    # Overdue (past due date)
+    overdue = await db.fetch("""
+        SELECT * FROM processed_invoices
+        WHERE status = 'COMPLETED'
+          AND due_date < $1
+          AND payment_confirmed = FALSE
+        ORDER BY due_date ASC
+    """, today)
+
+    if overdue:
+        await slack.post_to_channel(
+            FINANCE_ALERTS_CHANNEL,
+            build_overdue_alert(overdue)
+        )
+        # If any invoice >5 days overdue → also email Marie
+        critical = [i for i in overdue if (today - i.due_date).days > 5]
+        if critical:
+            await gmail.send_email(
+                MARIE_EMAIL,
+                subject=f"🔴 {len(critical)} facture(s) en retard critique",
+                body=build_overdue_email(critical)
+            )
+
+    if upcoming:
+        await slack.post_to_channel(
+            FINANCE_OPS_CHANNEL,
+            build_upcoming_due_alert(upcoming)
+        )
+```
+
+### Additional Database Field
+
+```sql
+-- Add to processed_invoices table
+ALTER TABLE processed_invoices ADD COLUMN payment_confirmed BOOLEAN DEFAULT FALSE;
+ALTER TABLE processed_invoices ADD COLUMN payment_confirmed_at TIMESTAMPTZ;
+ALTER TABLE processed_invoices ADD COLUMN payment_confirmed_by TEXT;
+```
+
+### Due Date Calculation
+
+Priority for determining `due_date`:
+1. Explicitly extracted from invoice PDF (`due_date` field from Claude)
+2. Calculated from `invoice_date + vendor.payment_terms` (e.g., +30 days)
+3. Default: `invoice_date + 30 days` (if vendor payment terms unknown)
+
+### Late Payment Slack Alert Format
+
+```
+🔴 PAIEMENTS EN RETARD — 2025-06-15
+──────────────────────────────
+⚠️ En retard:
+  • Metro — Facture #F2025-0834 — €2,430.00 — échéance dépassée de 3 jours (CC-01)
+  • EDF Pro — Facture #E20250612 — €890.50 — échéance dépassée de 1 jour (CC-03)
+
+📅 À payer dans les 3 prochains jours:
+  • Elis — Facture #EL-2025-445 — €340.00 — échéance le 17/06 (CC-02)
+  • SFR Business — Facture #SFR-F789 — €120.00 — échéance le 18/06 (CC-04)
+```
+
+### Payment Confirmation
+
+Payment is confirmed outside the system (in the bank / Pennylane). To close the loop:
+- **Option A**: Marie marks as paid via a Slack command (`/paid <invoice_id>`)
+- **Option B**: Nightly batch: Agent queries Pennylane API for payment status on outstanding invoices (if Pennylane API supports this — see Open Questions)
+
+---
+
+## 22. Operations Runbook (Post Go-Live)
+
+### Daily Operations (Thomas — 5 min/day)
+
+1. **08:30** — Check `#finance-ops` for daily digest
+2. Review any items in `#invoice-exceptions`:
+   - Unknown vendor → ask Marie to create
+   - Low confidence → review and correct fields in Slack modal
+   - Duplicate → confirm dismiss or force-process
+3. Check `#invoices-to-approve` — approve invoices under 500€
+4. Done. System handles everything else.
+
+### Daily Operations (Marie — 10 min/day)
+
+1. **08:30** — Check `#finance-ops` for daily digest
+2. **08:30** — Check `#finance-alerts` for late payments and overdue approvals
+3. Review and approve invoices in `#invoices-to-approve` (500€+)
+4. Handle unknown vendor exceptions (create vendor record via Slack modal)
+5. Check Notion `Factures en attente` if anything feels missed
+6. Weekly: review Notion `Fournisseurs` for vendor data quality
+
+### Adding a New Vendor
+
+When an unrecognized vendor is detected:
+
+1. Slack posts to `#invoice-exceptions` with extracted vendor name
+2. Click "Create Vendor" button in the Slack message
+3. Fill in modal:
+   - Vendor name (pre-filled from extraction)
+   - Aliases (name variants)
+   - SIRET (if known)
+   - Default GL account (dropdown with chart of accounts)
+   - Default VAT rate (dropdown)
+   - Usual cost centers (multi-select)
+   - Payment terms (days)
+   - Notes
+4. Submit → vendor created in PostgreSQL + synced to Notion
+5. Original invoice automatically reprocessed with new vendor data
+
+### Correcting a Vendor Default
+
+When an invoice is approved with a GL/VAT correction:
+
+1. Approve invoice in Slack with edits
+2. Agent automatically updates the vendor's default values
+3. If same correction happens 3 times → Slack notification prompts permanent update review
+4. Marie can also edit vendors directly in Notion `Fournisseurs` database (syncs back nightly)
+
+### Adding a New Property
+
+If the group opens a new property:
+
+1. Create new Pennylane entity → obtain API token
+2. Add env var `PENNYLANE_TOKEN_CC09=xxx` on Render
+3. Add entry to `COST_CENTER_FOLDERS`, `CC_SLACK_CHANNELS`, `PROPERTY_EMAIL_MAP` in config
+4. Create Google Drive folder `/YYYY/CC-09_NewPropertyName/`
+5. Create Slack channel `#hotel-newproperty`
+6. Add property manager Slack user ID to env vars
+7. Redeploy
+
+### Adding a New Budget Year
+
+When `Budget_Suivi_2026.xlsx` is created:
+
+1. Share new Google Sheet with the service account
+2. Update `GOOGLE_BUDGET_SHEET_ID` env var on Render
+3. Redeploy
+
+### Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---|---|---|
+| No invoices being processed | Gmail Pub/Sub expired or Render service down | Check Render dashboard; re-subscribe Pub/Sub if needed |
+| Invoice stuck at `PENDING_APPROVAL` | Approver hasn't responded; escalation may not have fired | Check `#finance-alerts`; manually approve in Slack or DB |
+| Invoice stuck at `PUSH_FAILED` | Pennylane API error | Check Render logs for error detail; use manual retry button in Slack |
+| Vendor not matching despite existing record | Name variant not in alias list | Add alias via Notion `Fournisseurs` or Slack modal |
+| Budget check returns empty | Budget Sheet format changed or new GL code not in sheet | Verify sheet structure; add missing GL row |
+| Slack buttons not responding | Socket Mode disconnected | Check Render logs; restart service on Render |
+| Duplicate false positive | Invoice number reused across properties (Metro) | Verify dedup key includes cost center; override in `#invoice-exceptions` |
+
+### Emergency: Manual Invoice Processing
+
+If the agent is down for extended period:
+
+1. Download PDF from Gmail
+2. Upload to correct Drive folder with naming convention
+3. Manually enter into Pennylane
+4. Log in Notion `Journal d'audit` with action = `MANUAL_ENTRY`
+5. When agent recovers, it will skip already-processed emails via `Message-ID` dedup
+
+### Monitoring Commands (Admin)
+
+```bash
+# Check recent job statuses
+curl https://invoice-agent.onrender.com/admin/jobs?limit=20
+
+# Reprocess a failed job
+curl -X POST https://invoice-agent.onrender.com/admin/jobs/{job_id}/retry
+
+# Health check
+curl https://invoice-agent.onrender.com/health
+
+# Force vendor Notion sync
+curl -X POST https://invoice-agent.onrender.com/admin/sync-vendors
+```
+
+### Scheduled Maintenance
+
+| Task | Frequency | Owner |
+|---|---|---|
+| Review Render logs for errors | Weekly | Thomas |
+| Verify Gmail Pub/Sub subscription active | Monthly | Agent auto-check |
+| Rotate Pennylane API tokens | Quarterly | Marie |
+| Review and clean vendoralias list | Quarterly | Marie |
+| Database backup verification | Monthly | Thomas (Render dashboard) |
+| Update budget sheet reference for new year | Annually (January) | Marie |
+| Review and tune Claude extraction prompt | As needed (when accuracy drops) | Developer |
